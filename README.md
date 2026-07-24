@@ -1,6 +1,8 @@
 # global-stock-data
 
-美股港股全栈数据工具包 — 8 层架构 · 18 个端点 · 5 个数据源 · 全部零鉴权 · 仅依赖 requests
+美股港股全栈数据工具包 — **13 层架构 · 30+ 个端点 · 11 个数据源 · 全部零鉴权 · 仅依赖 requests**
+
+> **V2.0（2026-07-24）：官方源优先。** 新增 CBOE 官方期权链（完整希腊字母 + IV + **0DTE** + 异动 flow）、FINRA 全市场每日空头成交量、SEC EDGAR 申报事件流（Form 4 内部人 / 8-K / 13F）与全市场横截面筛选、美债收益率曲线 / CFTC COT / 财报日历。**每个数据源标注了合规级别与条款原文**——因为"官方"不等于"可自由使用"。
 
 一个自包含的 Skill 文件，把分散在 5 个数据源里的美股/港股原始数据整合成 AI 编程助手直接能用的工具集。你不用再背东财 secid 前缀、Yahoo crumb 鉴权流程、SEC EDGAR 的 CIK 映射——全部封装好了。
 
@@ -25,7 +27,27 @@
 ├── 期权层      Yahoo crumb                                         期权链 calls+puts (仅美股)
 ├── SEC Filing  EDGAR submissions + XBRL                            10-K/10-Q/8-K + 503个GAAP指标 (仅美股)
 └── 工具层      东财search+push2列表 + Yahoo search + SEC CIK映射   搜索+全市场列表+新闻+ticker↔CIK
+
+━━━ V2.0 新增（官方源优先）━━━
+├── 期权·CBOE   cdn.cboe.com 官方延时                    ⭐全链+IV+delta/gamma/vega/theta/rho+0DTE+异动flow
+├── 做空层      FINRA Reg SHO                            ⭐全市场每日空头成交量(实测12,112只)+个股时序+排行
+├── 申报事件流  EDGAR 每日索引 + 全文检索                ⭐Form4内部人/8-K/13F当日全量 + 2001至今正文检索
+├── 全市场横截面 EDGAR frames                            ⭐任意XBRL标签一次拿全市场(1,842~5,309家)=免费screener
+└── 宏观/日历   Treasury + CFTC + Nasdaq                 ⭐收益率曲线(1M~30Y) + COT持仓 + 财报日历
 ```
+
+### 合规分级（V2.0 新增，取用前必读）
+
+各源条款差异极大，**"官方"不等于"可自由使用"**。以下结论来自 2026-07-24 逐家实读条款原文：
+
+| 级别 | 可商用 | 可再分发 | 源 | 依据（原文摘录） |
+|---|---|---|---|---|
+| **S** | ✅ | ✅ | SEC EDGAR / Treasury / CFTC | EDGAR 官网明示 *"Anyone can access and download this information **for free**"*、*"We **allow scripted access**"*；**硬上限 10 requests/second**，必须声明 User-Agent |
+| **B** | ⚠️自行确认 | ❌ | FINRA | 数据文件系主动发布；但站点条款禁止 *"data mining, scraping or harvesting tools (including robots)"*，并声明 *"**non-commercial use**"* |
+| **C** | ❌需授权 | ❌ | CBOE / Nasdaq / Yahoo / 东财 / 新浪 / 腾讯 | Cboe 要求 *"**approval in advance**"* + *"**execution of a license agreement**"*；Yahoo 官方写明 **personal use only** |
+| **⛔ 已排除** | — | — | HKEX (CCASS) | 条款明文禁止 *"'**robot**', '**bot**', '**spider**', '**scraper**'..."*，且适用于 *"**whether or not for gain**"* → **本工具不提供该抓取代码** |
+
+**本工具只分发代码，不分发、不转售任何市场数据。** 商用请只依赖 S 级源。
 
 ---
 
@@ -51,7 +73,7 @@ pip install requests
 
 ---
 
-## 18 个端点能力清单
+## 30+ 个端点能力清单
 
 ### 行情层（实时/延时）
 
@@ -143,11 +165,22 @@ pip install requests
 
 ---
 
-## V1.0 亮点
+## V2.0 亮点
 
 | 特性 | 说明 |
 |------|------|
-| **全部零鉴权** | 5 个数据源全部免费无 Key，Yahoo crumb 自动管理 |
+| ⭐ **0DTE 期权流** | CBOE 官方端点，含完整希腊字母 + IV；`unusual_activity()` 用 vol/OI>1 识别新建仓。**yfinance 无希腊字母，OpenBB 免费层不含此项** |
+| ⭐ **全市场每日空头量** | FINRA Reg SHO 单文件覆盖全市场（实测 12,112 只），可算 short volume ratio 日度趋势 |
+| ⭐ **申报事件流** | EDGAR 每日索引：实测单日 Form 4 内部人 547 份 / 8-K 370 份 / 13F 261 份 |
+| ⭐ **免费全市场 screener** | EDGAR frames：任意 XBRL 标签一次拿全市场横截面（净利润 CY2025Q1 覆盖 5,309 家） |
+| ⭐ **合规分级** | 每个源标注 S/B/C 级 + 条款原文，商用/再分发边界写清楚 |
+| ⭐ **内置限流** | 线程安全节流器；SEC 按官方 10 req/s 硬上限设为 8 req/s |
+
+### V1.0 亮点（保留）
+
+| 特性 | 说明 |
+|------|------|
+| **全部零鉴权** | 11 个数据源全部免费无 Key，Yahoo crumb 自动管理 |
 | **极简依赖** | 仅需 `requests`，零第三方数据封装 |
 | **美股 + 港股双覆盖** | 行情/K线/财报/资金流均支持双市场 |
 | **技术指标内置** | MA/EMA/MACD/RSI/KDJ/布林带，纯 Python 计算，拉完 K 线直接算，零额外依赖 |
