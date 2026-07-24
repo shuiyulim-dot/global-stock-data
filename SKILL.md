@@ -2,7 +2,7 @@
 name: global-stock-data
 description: 美股港股全栈数据工具包（官方源优先）— 十三层架构·30+端点·11数据源·全部零鉴权。在原有行情/K线/技术指标(MA/MACD/RSI/KDJ/布林带)/基本面/资金面/期权/SEC Filing/工具八层之上，新增：CBOE官方期权链(完整希腊字母+IV+0DTE流+异动识别)、FINRA全市场每日空头成交量、SEC EDGAR申报事件流(Form4内部人/8-K/13F机构持仓)、EDGAR全市场横截面筛选、美债收益率曲线/CFTC COT/财报日历。每个数据源标注合规级别与条款原文。内嵌全部调用代码，自包含零依赖外部文件。适用于美股港股个股分析、全市场筛选、财报解读、期权与0DTE策略、做空数据追踪、SEC文件检索、资金流与机构持仓分析等场景。
 origin: custom
-version: 2.0.0
+version: 2.0.1
 ---
 
 > 📦 项目主页：https://github.com/simonlin1212/global-stock-data — 更新、反馈、支持作者
@@ -291,6 +291,14 @@ import requests, time, threading
 SEC_CONTACT = "your-name your-email@example.com"
 
 
+class DataNotAvailable(RuntimeError):
+    """该日/该标的确实没有数据（如非交易日、文件尚未发布）——可安全回退到下一个候选日。
+
+    与配置错误、网络错误区分开：后者必须立刻抛给调用方，
+    否则「SEC_CONTACT 没配」会被日期回退循环吞掉，最后伪装成「没找到数据」。
+    """
+
+
 class _RateLimiter:
     """线程安全的最小间隔节流器（用锁，避免并发下被击穿）"""
 
@@ -324,11 +332,35 @@ def _limiter_for(url: str) -> _RateLimiter:
     return _LIMITS["_default"]
 
 
+def _is_object_missing(resp) -> bool:
+    """
+    正向识别「资源确实不存在」。
+
+    ⚠️ SEC Archives 与 FINRA CDN 都托管在 S3 上，而 S3 在调用方没有
+    ListBucket 权限时，对**不存在的对象**返回 `403 AccessDenied`（XML）
+    而不是 404 NoSuchKey。实测 2026-07-24 两个源行为一致。
+
+    真正的拒绝长得完全不同（SEC 的 UA 未声明返回 ~4.8KB HTML 页面），
+    所以这里按 Content-Type + XML 错误码正向判定，
+    而不是用「排除法」——否则限流/封禁会被伪装成「没数据」。
+    """
+    if resp.status_code == 404:
+        return True
+    if resp.status_code != 403:
+        return False
+    ctype = (resp.headers.get("Content-Type") or "").lower()
+    head = (resp.text or "")[:500]
+    return "xml" in ctype and "<Code>AccessDenied</Code>" in head
+
+
 def official_get(url: str, params: dict = None, headers: dict = None,
                  timeout: int = 30, as_json: bool = False):
     """
     V2.0 官方源统一出口：自动节流 + UA 处理 + 友好错误。
     as_json=True 返回 dict，否则返回 str。
+
+    异常语义：资源不存在 → DataNotAvailable（调用方可回退到下一个候选日）；
+             配置/限流/网络 → RuntimeError（必须冒泡）。
     """
     if "sec.gov" in url:
         if "your-email@example.com" in SEC_CONTACT:
@@ -345,16 +377,35 @@ def official_get(url: str, params: dict = None, headers: dict = None,
         r = requests.get(url, params=params, headers=h, timeout=timeout)
         r.raise_for_status()
     except requests.HTTPError as e:
-        code = e.response.status_code
-        hint = {
-            403: "被拒绝：检查 User-Agent（SEC 需真实联系方式）、标的是否存在、或触发限速",
-            404: "端点不存在：可能该日无数据（非交易日）或接口已变更",
-            429: "请求过快：已内置节流，若仍触发请调低 _LIMITS",
-        }.get(code, "")
+        resp = e.response
+        code = resp.status_code
+        low = (resp.text or "")[:4000].lower()
+        # ① 正向识别：资源确实不存在（404，或 S3 风格的 403 AccessDenied）
+        if _is_object_missing(resp):
+            raise DataNotAvailable(
+                f"HTTP {code} {url[:80]} — 资源不存在（该日无数据/尚未发布）") from e
+        # ② SEC 的 UA 未声明（返回 HTML 页，含 Undeclared Automated Tool）
+        if code == 403 and "undeclared" in low:
+            raise RuntimeError(
+                f"SEC 拒绝请求：User-Agent 未被识别为已声明。"
+                f"当前 SEC_CONTACT={SEC_CONTACT!r}，"
+                f"格式应为 'Company Name AdminContact@domain.com'") from e
+        # ③ 其余一律视为真错误，必须冒泡（限流/封禁/权限/接口变更）
+        hint = {403: "被拒绝：限流、封禁或权限问题（已排除「资源不存在」）",
+                404: "端点不存在：接口可能已变更",
+                429: "请求过快：已内置节流，若仍触发请调低 _LIMITS"}.get(code, "")
         raise RuntimeError(f"HTTP {code} {url[:80]} — {hint}") from e
     except requests.RequestException as e:
         raise RuntimeError(f"请求失败 {url[:80]} — {type(e).__name__}: {e}") from e
     return r.json() if as_json else r.text
+
+
+# ── 异常约定（V2.0）──
+#   DataNotAvailable : 该日/该标的确实没有数据（非交易日、文件未发布、标的无期权…）
+#                      → 调用方可安全回退到下一个候选日
+#   RuntimeError     : 配置错误（SEC_CONTACT 未改）、限流、网络故障
+#                      → 必须冒泡给使用者，不可伪装成「没数据」
+#   ValueError       : 参数错误（如把港股代码传给仅支持美股的层）
 
 
 def assert_us_ticker(ticker: str) -> str:
@@ -1276,15 +1327,43 @@ def options_chain_cboe(ticker: str) -> dict:
             "last_trade_price": o.get("last_trade_price"),
         })
     if not contracts:
-        raise RuntimeError(f"{ticker} 未返回任何期权合约 —— 该标的可能无期权，"
-                           f"或不在 CBOE 覆盖范围（CBOE 仅覆盖美股）")
+        raise DataNotAvailable(f"{ticker} 未返回任何期权合约 —— 该标的可能无期权，"
+                               f"或不在 CBOE 覆盖范围（CBOE 仅覆盖美股）")
     return {"ticker": ticker, "timestamp": raw.get("timestamp"),
             "spot": data.get("current_price"), "contracts": contracts}
 
 
+try:
+    from zoneinfo import ZoneInfo
+    _ET_TZ = ZoneInfo("America/New_York")
+except Exception:      # Windows 上 zoneinfo 可能缺 tzdata
+    _ET_TZ = None
+
+
 def _et_today() -> str:
-    """美东今日 YYYY-MM-DD（EDT=UTC-4，用于 0DTE 判定）"""
-    return (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+    """
+    美东今日 YYYY-MM-DD，用于 0DTE 判定。
+
+    ⚠️ 必须区分 EDT(UTC-4) 与 EST(UTC-5)：硬编码 UTC-4 会让冬令时
+    UTC 04:00–05:00 这一小时算成次日，导致 0DTE 选错到期日。
+    """
+    now = datetime.now(timezone.utc)
+    if _ET_TZ is not None:
+        return now.astimezone(_ET_TZ).strftime("%Y-%m-%d")
+    # 无 tzdata 时的回退：按美国 DST 规则（3月第2个周日 ~ 11月第1个周日）自算
+    y = now.year
+    # 美国 DST 在**当地时间 2:00** 切换，换算成 UTC：
+    #   开始 = 3月第2个周日 02:00 EST = 07:00 UTC
+    #   结束 = 11月第1个周日 02:00 EDT = 06:00 UTC
+    # 用 00:00 UTC 当切换点会在切换日凌晨那几小时取错偏移。
+    mar8 = datetime(y, 3, 8, tzinfo=timezone.utc)
+    dst_start = (mar8 + timedelta(days=(6 - mar8.weekday()) % 7)
+                 ).replace(hour=7)
+    nov1 = datetime(y, 11, 1, tzinfo=timezone.utc)
+    dst_end = (nov1 + timedelta(days=(6 - nov1.weekday()) % 7)
+               ).replace(hour=6)
+    offset = 4 if dst_start <= now < dst_end else 5
+    return (now - timedelta(hours=offset)).strftime("%Y-%m-%d")
 
 
 def filter_expiry(chain: dict, expiry: str = None, dte_max: int = None) -> list[dict]:
@@ -1762,8 +1841,9 @@ def short_volume_all(date: str = None, market: str = "CNMS") -> dict:
         try:
             raw = official_get(
                 f"https://cdn.finra.org/equity/regsho/daily/{market}shvol{d}.txt")
-        except Exception:
+        except DataNotAvailable:
             continue   # 该日无文件（非交易日/尚未发布），回退下一日
+        # 其余异常（网络/限流/配置）直接抛出，不伪装成「没数据」
         rows = {}
         for line in raw.splitlines()[1:]:
             p = line.split("|")
@@ -1777,7 +1857,10 @@ def short_volume_all(date: str = None, market: str = "CNMS") -> dict:
                           "ratio": round(sv / tv, 4) if tv else None}
         if rows:
             return {"date": d, "market": market, "count": len(rows), "data": rows}
-    raise RuntimeError(f"未找到 {market} 近 7 个工作日的 Reg SHO 数据")
+    # 抛 DataNotAvailable 而非 RuntimeError：指定日期无数据时，
+    # 调用方（如 short_volume_symbol 的多日循环）要能捕获并跳过这一天
+    raise DataNotAvailable(f"未找到 {market} "
+                           f"{'该日' if date else '近 7 个工作日'}的 Reg SHO 数据")
 
 
 def short_volume_symbol(symbol: str, days: int = 5, market: str = "CNMS") -> list[dict]:
@@ -1788,7 +1871,7 @@ def short_volume_symbol(symbol: str, days: int = 5, market: str = "CNMS") -> lis
             break
         try:
             snap = short_volume_all(date=d, market=market)
-        except Exception:
+        except DataNotAvailable:
             continue
         rec = snap["data"].get(symbol.upper())
         if rec:
@@ -1838,8 +1921,10 @@ def daily_filings(date: str = None, forms: list[str] = None) -> dict:
                f"{dt.year}/QTR{(dt.month - 1) // 3 + 1}/form.{d}.idx")
         try:
             raw = official_get(url)
-        except Exception:
-            continue
+        except DataNotAvailable:
+            continue   # 该日无索引文件，回退下一日
+        # 配置错误（SEC_CONTACT 未改）与网络错误在此直接抛出——
+        # 否则会被 7 次循环吞掉，最终误报成「未找到 EDGAR 每日索引」
         lines = raw.splitlines()
         start = next((i + 1 for i, L in enumerate(lines) if L.startswith("---")), 11)
         filings, by_form = [], {}
@@ -1860,7 +1945,7 @@ def daily_filings(date: str = None, forms: list[str] = None) -> dict:
             return {"date": d, "total": sum(by_form.values()),
                     "by_form": dict(sorted(by_form.items(), key=lambda x: -x[1])),
                     "filings": filings}
-    raise RuntimeError("未找到近 7 个工作日的 EDGAR 每日索引")
+    raise DataNotAvailable("未找到近 7 个工作日的 EDGAR 每日索引")
 ```
 
 **实测（2026-07-23，当日 3,703 份）**：424B2=627 / **Form 4 内部人=547** / **8-K=370** /
