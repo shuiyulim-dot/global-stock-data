@@ -222,4 +222,4 @@ pip install requests
 
 ## License
 
-[Apache License 2.0](./LICENSE) — 自由使用，注明出处即可。**作者：** Simon 林 · X [@linsizhen](https://x.com/linsizhen) · TikTok [@simonlin0423](https://www.tiktok.com/@simonlin0423) · Email [simonlin0423@gmail.com](mailto:simonlin0423@gmail.com) · 抖音「Simon林」 · 公众号「硅基世纪」
+[Apache License 2.0](./LICENSE) — 自由使用，注明出处即可。**Author:** Simon Lin · X [@linsizhen](https://x.com/linsizhen) · TikTok [@simonlin0423](https://www.tiktok.com/@simonlin0423) · Email: [simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)

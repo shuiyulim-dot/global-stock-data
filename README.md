@@ -228,4 +228,4 @@ This project provides data-access tools only. It is not investment advice. Inves
 
 ## License
 
-[Apache License 2.0](./LICENSE) — **Author:** Simon Lin · X [@linsizhen](https://x.com/linsizhen) · TikTok [@simonlin0423](https://www.tiktok.com/@simonlin0423) · Email [simonlin0423@gmail.com](mailto:simonlin0423@gmail.com) · Douyin "Simon林" · WeChat "硅基世纪"
+[Apache License 2.0](./LICENSE) — **Author:** Simon Lin · X [@linsizhen](https://x.com/linsizhen) · TikTok [@simonlin0423](https://www.tiktok.com/@simonlin0423) · Email: [simonlin0423@gmail.com](mailto:simonlin0423@gmail.com)
