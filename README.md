@@ -1,3 +1,5 @@
+<p align="center"><a href="README_zh.md">简体中文</a> | <b>English</b></p>
+
 # global-stock-data · US & HK Market Data for AI Coding Assistants
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -8,7 +10,7 @@
 [![Sources](https://img.shields.io/badge/sources-11-2ea44f.svg)](#data-sources)
 [![Zero-Auth](https://img.shields.io/badge/auth-zero-success.svg)](#data-sources)
 
-**[Architecture](#architecture) · [Compliance](#compliance-tiers) · [Quick Start](#quick-start) · [Endpoints](#endpoints) · [Data Sources](#data-sources) · [FAQ](#faq) · [🇨🇳 中文文档](README.zh-CN.md)**
+**[Architecture](#architecture) · [Compliance](#compliance-tiers) · [Quick Start](#quick-start) · [Endpoints](#endpoints) · [Data Sources](#data-sources) · [FAQ](#faq) · [🇨🇳 中文文档](README_zh.md)**
 
 > **Full-stack market data for US & HK equities** — 13 layers · 30+ endpoints · 11 sources · zero-auth · only `requests`.
 >
@@ -218,6 +220,10 @@ Yes. SKILL.md is Markdown + embedded Python — Codex, OpenClaw, or any AI codin
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
+## Disclaimer
+
+This project provides data-access tools only. It is not investment advice. Investing involves risk.
+
 ## Support
 
 If this saved you time, a coffee is appreciated ☕
@@ -227,10 +233,6 @@ If this saved you time, a coffee is appreciated ☕
 </p>
 
 Want a data endpoint that isn't here? Open an [Issue](https://github.com/simonlin1212/global-stock-data/issues); sponsors' issues go first.
-
-## Disclaimer
-
-This project provides data-access tools only. It is not investment advice. Investing involves risk.
 
 ## License
 
