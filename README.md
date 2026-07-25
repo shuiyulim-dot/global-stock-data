@@ -220,7 +220,13 @@ See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Support
 
-If this saved you time, a coffee is appreciated ☕ — [Buy Me a Coffee](https://buymeacoffee.com/simonlin1212). Want a data endpoint that isn't here? Open an [Issue](https://github.com/simonlin1212/global-stock-data/issues); sponsors' issues go first.
+If this saved you time, a coffee is appreciated ☕
+
+<p align="center">
+  <a href="https://buymeacoffee.com/simonlin1212"><img src="./assets/bmc-qr.png" width="180" alt="Buy Me a Coffee"></a>
+</p>
+
+Want a data endpoint that isn't here? Open an [Issue](https://github.com/simonlin1212/global-stock-data/issues); sponsors' issues go first.
 
 ## Disclaimer
 
