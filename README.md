@@ -220,7 +220,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Support
 
-If this saved you time, a coffee is appreciated ☕ — [Afdian](https://ifdian.net/a/simonlin) · [Buy Me a Coffee](https://buymeacoffee.com/simonlin1212). Want a data endpoint that isn't here? Open an [Issue](https://github.com/simonlin1212/global-stock-data/issues); sponsors' issues go first.
+If this saved you time, a coffee is appreciated ☕ — [Buy Me a Coffee](https://buymeacoffee.com/simonlin1212). Want a data endpoint that isn't here? Open an [Issue](https://github.com/simonlin1212/global-stock-data/issues); sponsors' issues go first.
 
 ## Disclaimer
 
