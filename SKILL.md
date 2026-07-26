@@ -2,7 +2,7 @@
 name: global-stock-data
 description: 美股港股全栈数据工具包（官方源优先）— 十三层架构·30+端点·11数据源·全部零鉴权。在原有行情/K线/技术指标(MA/MACD/RSI/KDJ/布林带)/基本面/资金面/期权/SEC Filing/工具八层之上，新增：CBOE官方期权链(完整希腊字母+IV+0DTE流+异动识别)、FINRA全市场每日空头成交量、SEC EDGAR申报事件流(Form4内部人/8-K/13F机构持仓)、EDGAR全市场横截面筛选、美债收益率曲线/CFTC COT/财报日历。每个数据源标注合规级别与条款原文。内嵌全部调用代码，自包含零依赖外部文件。适用于美股港股个股分析、全市场筛选、财报解读、期权与0DTE策略、做空数据追踪、SEC文件检索、资金流与机构持仓分析等场景。
 origin: custom
-version: 2.0.1
+version: 2.0.2
 ---
 
 > 📦 项目主页：https://github.com/simonlin1212/global-stock-data — 更新、反馈、支持作者
