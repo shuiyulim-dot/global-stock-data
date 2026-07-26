@@ -17,6 +17,11 @@
 年度请求同样受影响（`Assets/CY2024` → 404），现落到 `CY2024Q4I`。
 
 新增 `_INSTANT_TAGS` 集合做区分；期间(duration)概念行为不变。
+
+`market_frame()` 还支持传**任意原始 XBRL 标签**（`Liabilities` / `InventoryNet` /
+`AssetsCurrent` …），这些不在内置别名表里、同样是时点概念。因此改为**自动回退**：
+先按 `_INSTANT_TAGS` 猜一种周期形式，收到 404 再换另一种重试，无需穷举所有时点概念。
+已知类型时可显式传 `instant=True/False` 省掉一次探测请求。
 验证：13 个标签 × 季度/年度共 26 项请求全部返回有效数据（修前 8 项为 404）。
 
 ### 加固：OCC 合约代码允许调整后根符号

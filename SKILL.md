@@ -2062,25 +2062,44 @@ _INSTANT_TAGS = {
 }
 
 
-def market_frame(tag: str, year: int, quarter: int = None, unit: str = "USD") -> dict:
+def _frame_period(year: int, quarter, instant: bool) -> str:
+    """时点概念没有纯年度周期，年度请求落到 Q4I。"""
+    if instant:
+        return f"CY{year}Q{quarter}I" if quarter else f"CY{year}Q4I"
+    return f"CY{year}Q{quarter}" if quarter else f"CY{year}"
+
+
+def market_frame(tag: str, year: int, quarter: int = None, unit: str = "USD",
+                 instant=None) -> dict:
     """
     全市场横截面。tag 可用 XBRL_TAGS 的中文键或原始 XBRL 标签。
     quarter: 1-4 季度；None 为年度
+    instant: 是否为时点(资产负债表)概念。None=自动判定。
 
-    时点概念(见 _INSTANT_TAGS)自动改用 CY{year}Q{q}I；年度请求会落到 Q4I，
-    因为 SEC 对时点概念不提供纯年度周期。
+    自动判定逻辑：先按 _INSTANT_TAGS 猜一种周期形式，404 再换另一种重试。
+    这样**任意原始 XBRL 标签**（Liabilities / InventoryNet / AssetsCurrent …）
+    都能正确取到数，而不必把所有时点概念都枚举进 _INSTANT_TAGS。
+    已知类型时显式传 instant=True/False 可省掉一次探测请求。
     """
     tag = XBRL_TAGS.get(tag, tag)
-    if tag in _INSTANT_TAGS:
-        period = f"CY{year}Q{quarter}I" if quarter else f"CY{year}Q4I"
-    else:
-        period = f"CY{year}Q{quarter}" if quarter else f"CY{year}"
-    j = official_get(
-        f"https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/{unit}/{period}.json",
-        timeout=45, as_json=True)
-    rows = [{"cik": d.get("cik"), "entity": d.get("entityName"),
-             "value": d.get("val"), "end": d.get("end")} for d in j.get("data", [])]
-    return {"tag": tag, "period": period, "unit": unit, "count": len(rows), "data": rows}
+    guess = (tag in _INSTANT_TAGS) if instant is None else instant
+    attempts = [guess] if instant is not None else [guess, not guess]
+
+    last_err = None
+    for is_instant in attempts:
+        period = _frame_period(year, quarter, is_instant)
+        try:
+            j = official_get(
+                f"https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/{unit}/{period}.json",
+                timeout=45, as_json=True)
+        except DataNotAvailable as e:      # 周期形式不对时 SEC 返回 404
+            last_err = e
+            continue
+        rows = [{"cik": d.get("cik"), "entity": d.get("entityName"),
+                 "value": d.get("val"), "end": d.get("end")} for d in j.get("data", [])]
+        return {"tag": tag, "period": period, "unit": unit,
+                "instant": is_instant, "count": len(rows), "data": rows}
+    raise last_err
 
 
 def frame_ranking(frame: dict, top: int = 20, ascending: bool = False) -> list[dict]:
