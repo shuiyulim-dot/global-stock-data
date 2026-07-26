@@ -1331,7 +1331,9 @@ from datetime import datetime, timezone, timedelta
 
 CBOE_BASE = "https://cdn.cboe.com/api/global/delayed_quotes"
 # OCC 合约代码: 标的 + YYMMDD + C/P + 8位行权价(千分之一美元)
-_OSI = re.compile(r"^(?P<root>[A-Z]+)(?P<y>\d{2})(?P<m>\d{2})(?P<d>\d{2})"
+# root 允许含数字：拆股/分拆等公司行为会产生调整后合约（如 NVDA1、BRKB1）。
+# 后面全是定宽组（6+1+8=15 字符），正则回溯能正确对齐，标准合约解析结果不变。
+_OSI = re.compile(r"^(?P<root>[A-Z][A-Z0-9]*)(?P<y>\d{2})(?P<m>\d{2})(?P<d>\d{2})"
                   r"(?P<cp>[CP])(?P<strike>\d{8})$")
 
 
