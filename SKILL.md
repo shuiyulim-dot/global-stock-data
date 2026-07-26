@@ -2,7 +2,7 @@
 name: global-stock-data
 description: 美股港股全栈数据工具包（官方源优先）— 十三层架构·30+端点·11数据源·全部零鉴权。在原有行情/K线/技术指标(MA/MACD/RSI/KDJ/布林带)/基本面/资金面/期权/SEC Filing/工具八层之上，新增：CBOE官方期权链(完整希腊字母+IV+0DTE流+异动识别)、FINRA全市场每日空头成交量、SEC EDGAR申报事件流(Form4内部人/8-K/13F机构持仓)、EDGAR全市场横截面筛选、美债收益率曲线/CFTC COT/财报日历。每个数据源标注合规级别与条款原文。内嵌全部调用代码，自包含零依赖外部文件。适用于美股港股个股分析、全市场筛选、财报解读、期权与0DTE策略、做空数据追踪、SEC文件检索、资金流与机构持仓分析等场景。
 origin: custom
-version: 2.0.2
+version: 2.0.3
 ---
 
 > 📦 项目主页：https://github.com/simonlin1212/global-stock-data — 更新、反馈、支持作者
@@ -2046,14 +2046,33 @@ XBRL_TAGS = {
     "稀释EPS": "EarningsPerShareDiluted",
 }
 
+# ⚠️ 时点(instant)概念 —— 资产负债表科目描述的是「某一时刻的余额」，而非一段期间的发生额。
+# SEC Frames 对这类概念**要求周期带 I 后缀**，且**没有纯年度周期**：
+#   Assets/CY2025Q1  -> 404      Assets/CY2025Q1I -> 200 (5643 家)
+#   Assets/CY2024    -> 404      Assets/CY2024Q4I -> 200 (6248 家)
+# 期间(duration)概念(营收/净利/现金流等)则相反，用 CY2025Q1 / CY2024。
+# 以上均为 2026-07-26 逐个实测结果。
+_INSTANT_TAGS = {
+    "Assets",
+    "StockholdersEquity",
+    "CashAndCashEquivalentsAtCarryingValue",
+    "LongTermDebtNoncurrent",
+}
+
 
 def market_frame(tag: str, year: int, quarter: int = None, unit: str = "USD") -> dict:
     """
     全市场横截面。tag 可用 XBRL_TAGS 的中文键或原始 XBRL 标签。
     quarter: 1-4 季度；None 为年度
+
+    时点概念(见 _INSTANT_TAGS)自动改用 CY{year}Q{q}I；年度请求会落到 Q4I，
+    因为 SEC 对时点概念不提供纯年度周期。
     """
     tag = XBRL_TAGS.get(tag, tag)
-    period = f"CY{year}Q{quarter}" if quarter else f"CY{year}"
+    if tag in _INSTANT_TAGS:
+        period = f"CY{year}Q{quarter}I" if quarter else f"CY{year}Q4I"
+    else:
+        period = f"CY{year}Q{quarter}" if quarter else f"CY{year}"
     j = official_get(
         f"https://data.sec.gov/api/xbrl/frames/us-gaap/{tag}/{unit}/{period}.json",
         timeout=45, as_json=True)

@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.0.3 — 2026-07-26
+
+### 修复：EDGAR Frames 对资产负债表科目一直返回 404
+
+`market_frame()` 一律拼 `CY{year}Q{q}` / `CY{year}`，但 SEC Frames 对**时点(instant)概念**
+要求周期带 `I` 后缀，且不提供纯年度周期。`XBRL_TAGS` 里有 4 个属于此类，此前**全部取不到数**：
+
+| 标签 | 修前 | 修后 |
+|---|---|---|
+| 总资产 `Assets` | `CY2025Q1` → 404 | `CY2025Q1I` → 5643 家 |
+| 股东权益 `StockholdersEquity` | 404 | 5465 家 |
+| 现金及等价物 `CashAndCashEquivalentsAtCarryingValue` | 404 | 4506 家 |
+| 长期负债 `LongTermDebtNoncurrent` | 404 | 1532 家 |
+
+年度请求同样受影响（`Assets/CY2024` → 404），现落到 `CY2024Q4I`。
+
+新增 `_INSTANT_TAGS` 集合做区分；期间(duration)概念行为不变。
+验证：13 个标签 × 季度/年度共 26 项请求全部返回有效数据（修前 8 项为 404）。
+
 ## v2.0.2 — 2026-07-26
 
 ### 修复：腾讯行情字段下标错误 — 两个函数此前 100% 崩溃
