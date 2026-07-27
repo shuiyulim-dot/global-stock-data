@@ -67,7 +67,7 @@ jobs:
               )
               status, raw = request_bytes(
                   url,
-                  headers={"User-Agent": "JATF-GitHub-Actions/2.0"},
+                  headers={"User-Agent": "JATF-GitHub-Actions/2.1"},
                   timeout=30,
               )
               text = raw.decode("utf-8-sig", errors="replace")
@@ -81,10 +81,20 @@ jobs:
                       "confirm the sheet remains accessible to the workflow."
                   )
 
-              rows = list(csv.DictReader(io.StringIO(text)))
+              reader = csv.DictReader(io.StringIO(text))
+              rows = list(reader)
               if not rows and sheet_name in {"Portfolio", "Watchlist"}:
                   raise RuntimeError(f"Spreadsheet sheet is empty: {sheet_name}")
-              return rows
+              return list(reader.fieldnames or []), rows
+
+
+          def require_headers(sheet_name, headers, required):
+              missing = [header for header in required if header not in headers]
+              if missing:
+                  raise RuntimeError(
+                      f"{sheet_name} is missing required columns: {missing}. "
+                      f"Available columns: {headers}"
+                  )
 
 
           def parse_bool(value):
@@ -160,19 +170,79 @@ jobs:
 
 
           def build_universe():
-              portfolio_rows = load_sheet_rows("Portfolio")
-              watchlist_rows = load_sheet_rows("Watchlist")
-              universe = {}
+              portfolio_headers, portfolio_rows = load_sheet_rows("Portfolio")
+              watchlist_headers, watchlist_rows = load_sheet_rows("Watchlist")
 
-              for row in portfolio_rows:
+              require_headers(
+                  "Portfolio",
+                  portfolio_headers,
+                  ["Market", "Ticker", "Name", "Quantity", "Status"],
+              )
+              require_headers(
+                  "Watchlist",
+                  watchlist_headers,
+                  ["Enabled", "Market", "Ticker", "Name"],
+              )
+
+              universe = {}
+              active_portfolio_keys = set()
+              portfolio_errors = []
+
+              for sheet_row, row in enumerate(portfolio_rows, start=2):
                   quantity = safe_float(row.get("Quantity")) or 0
                   status = str(row.get("Status") or "").strip().upper()
-                  if quantity > 0 and status == "ACTIVE":
-                      add_security(universe, row, "Portfolio")
+
+                  if quantity <= 0:
+                      continue
+
+                  market = normalize_market(row.get("Market"))
+                  ticker_raw = str(row.get("Ticker") or "").strip()
+
+                  if status != "ACTIVE":
+                      portfolio_errors.append({
+                          "row": sheet_row,
+                          "market": market,
+                          "ticker": ticker_raw,
+                          "quantity": quantity,
+                          "status": status,
+                          "error": "Non-zero Portfolio row must have Status=Active",
+                      })
+                      continue
+
+                  try:
+                      ticker = normalize_ticker(market, ticker_raw)
+                  except Exception as error:
+                      portfolio_errors.append({
+                          "row": sheet_row,
+                          "market": market,
+                          "ticker": ticker_raw,
+                          "quantity": quantity,
+                          "status": status,
+                          "error": str(error),
+                      })
+                      continue
+
+                  active_portfolio_keys.add((market, ticker))
+                  add_security(universe, row, "Portfolio")
+
+              if portfolio_errors:
+                  raise RuntimeError(
+                      "Portfolio integrity validation failed: "
+                      + json.dumps(portfolio_errors, ensure_ascii=False)
+                  )
 
               for row in watchlist_rows:
                   if parse_bool(row.get("Enabled")):
                       add_security(universe, row, "Watchlist")
+
+              missing_from_universe = sorted(
+                  active_portfolio_keys.difference(universe.keys())
+              )
+              if missing_from_universe:
+                  raise RuntimeError(
+                      "Active Portfolio securities are missing from the generated universe: "
+                      + json.dumps(missing_from_universe, ensure_ascii=False)
+                  )
 
               securities = sorted(
                   universe.values(),
@@ -182,7 +252,7 @@ jobs:
                   raise RuntimeError(
                       "Dynamic universe is empty: no active Portfolio rows and no enabled Watchlist rows."
                   )
-              return securities
+              return securities, active_portfolio_keys
 
 
           def normalize_quote_time(raw_value):
@@ -294,7 +364,14 @@ jobs:
               raise ValueError(f"Unsupported market: {security['market']}")
 
 
-          def upload_group(market, snapshot_date, quotes, failures, universe_size):
+          def upload_group(
+              market,
+              snapshot_date,
+              quotes,
+              failures,
+              universe_size,
+              active_portfolio_count,
+          ):
               payload_quotes = []
               for quote in quotes:
                   row = dict(quote)
@@ -308,11 +385,13 @@ jobs:
                   "metadata": {
                       "market": market,
                       "requested_universe": universe_size,
+                      "active_portfolio_count": active_portfolio_count,
                       "successful_in_group": len(payload_quotes),
                       "failed_total": len(failures),
                       "failures": failures,
                       "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                       "universe_source": "Portfolio + enabled Watchlist",
+                      "portfolio_coverage_gate": "PASS",
                   },
               }
               body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -321,7 +400,7 @@ jobs:
                   data=body,
                   headers={
                       "Content-Type": "application/json; charset=utf-8",
-                      "User-Agent": "JATF-GitHub-Actions/2.0",
+                      "User-Agent": "JATF-GitHub-Actions/2.1",
                   },
                   method="POST",
                   timeout=30,
@@ -341,8 +420,11 @@ jobs:
               return result
 
 
-          universe = build_universe()
-          print(f"Dynamic universe: {len(universe)} securities")
+          universe, active_portfolio_keys = build_universe()
+          print(
+              f"Dynamic universe: {len(universe)} securities | "
+              f"active Portfolio: {len(active_portfolio_keys)}"
+          )
           for security in universe:
               print(
                   f"  {security['market']:<2} {security['ticker']:<8} "
@@ -377,6 +459,31 @@ jobs:
                       file=sys.stderr,
                   )
 
+          successful_keys = {
+              (quote["market"], quote["code"])
+              for quote in quotes
+          }
+          uncovered_portfolio = sorted(
+              active_portfolio_keys.difference(successful_keys)
+          )
+          for market, ticker in uncovered_portfolio:
+              if not any(
+                  item["market"] == market and item["ticker"] == ticker
+                  for item in critical_failures
+              ):
+                  critical_failures.append({
+                      "market": market,
+                      "ticker": ticker,
+                      "origins": ["Portfolio"],
+                      "error": "Active Portfolio ticker has no successful quote",
+                  })
+
+          if critical_failures:
+              raise RuntimeError(
+                  "Portfolio-to-Live-Data coverage gate failed; no partial upload performed: "
+                  + json.dumps(critical_failures, ensure_ascii=False)
+              )
+
           if not quotes:
               raise RuntimeError("No valid quotes were retrieved from the dynamic universe.")
 
@@ -393,18 +500,14 @@ jobs:
                   group,
                   failures,
                   len(universe),
+                  len(active_portfolio_keys),
               )
               total_written += int(result.get("rows_written", 0) or 0)
               total_duplicates += int(result.get("duplicates_skipped", 0) or 0)
 
           print(
               f"Completed: {len(quotes)} quotes; {total_written} rows written; "
-              f"{total_duplicates} duplicates skipped; {len(failures)} failures."
+              f"{total_duplicates} duplicates skipped; {len(failures)} "
+              "watchlist-only failures."
           )
-
-          if critical_failures:
-              raise RuntimeError(
-                  "One or more active Portfolio securities failed quote retrieval: "
-                  + json.dumps(critical_failures, ensure_ascii=False)
-              )
           PY
