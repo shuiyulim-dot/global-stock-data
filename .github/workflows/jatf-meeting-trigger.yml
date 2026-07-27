@@ -1,0 +1,60 @@
+name: JATF Meeting Refresh Trigger
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  actions: write
+  issues: write
+  contents: read
+
+jobs:
+  dispatch-market-refresh:
+    if: startsWith(github.event.issue.title, '[JATF REFRESH]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve requested market
+        id: request
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+
+          body = os.environ.get("ISSUE_BODY", "")
+          match = re.search(r"(?im)^\s*market\s*:\s*(US|HK|ALL)\s*$", body)
+          market = match.group(1).upper() if match else "ALL"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"market={market}\n")
+          PY
+
+      - name: Dispatch live market data workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${REPOSITORY}/actions/workflows/jatf-market-data.yml/dispatches" \
+            -f ref="${GITHUB_REF_NAME}"
+
+      - name: Confirm dispatch and close request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          MARKET: ${{ steps.request.outputs.market }}
+        run: |
+          gh issue comment "${ISSUE_NUMBER}" \
+            --repo "${REPOSITORY}" \
+            --body "Market refresh dispatched for **${MARKET}**. The JATF Market Data workflow will rebuild the universe from Spreadsheet, fetch current quotes, validate portfolio coverage, and write the result to Live Market Data."
+
+          gh issue close "${ISSUE_NUMBER}" \
+            --repo "${REPOSITORY}" \
+            --reason completed
