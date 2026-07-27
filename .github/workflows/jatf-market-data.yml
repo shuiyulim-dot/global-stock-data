@@ -2,9 +2,14 @@ name: JATF Market Data
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/jatf-market-data.yml
 
 jobs:
-  update-hk-market-data:
+  update-market-data:
     runs-on: ubuntu-latest
 
     steps:
@@ -13,187 +18,393 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Fetch and upload Hong Kong quotes
+      - name: Build Spreadsheet universe, fetch quotes, and upload
         env:
           JATF_WEB_APP_URL: ${{ secrets.JATF_WEB_APP_URL }}
           JATF_API_TOKEN: ${{ secrets.JATF_API_TOKEN }}
+          JATF_SPREADSHEET_ID: 1e74OtPgtbkn6JzGS-YFMjdelIH8gXx7osHJPFC53gg4
         run: |
           python - <<'PY'
+          import csv
+          import io
           import json
           import os
           import sys
+          import urllib.parse
           import urllib.request
+          from collections import defaultdict
           from datetime import datetime
-          from zoneinfo import ZoneInfo
 
-          WATCHLIST = [
-              "00700",
-              "00981",
-              "02476",
-              "02513",
-              "06869",
-              "07709",
-              "06082",
-              "01888",
-              "06809",
-          ]
 
           WEB_APP_URL = os.environ.get("JATF_WEB_APP_URL", "").strip()
           API_TOKEN = os.environ.get("JATF_API_TOKEN", "").strip()
+          SPREADSHEET_ID = os.environ.get("JATF_SPREADSHEET_ID", "").strip()
 
           if not WEB_APP_URL:
               raise RuntimeError("Missing GitHub secret: JATF_WEB_APP_URL")
-
           if not API_TOKEN:
               raise RuntimeError("Missing GitHub secret: JATF_API_TOKEN")
+          if not SPREADSHEET_ID:
+              raise RuntimeError("Missing JATF_SPREADSHEET_ID")
+
+
+          def request_bytes(url, *, data=None, headers=None, method=None, timeout=30):
+              request = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers=headers or {},
+                  method=method,
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return response.status, response.read()
+
+
+          def load_sheet_rows(sheet_name):
+              encoded_sheet = urllib.parse.quote(sheet_name, safe="")
+              url = (
+                  f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq"
+                  f"?tqx=out:csv&sheet={encoded_sheet}"
+              )
+              status, raw = request_bytes(
+                  url,
+                  headers={"User-Agent": "JATF-GitHub-Actions/2.0"},
+                  timeout=30,
+              )
+              text = raw.decode("utf-8-sig", errors="replace")
+              if status != 200:
+                  raise RuntimeError(
+                      f"Spreadsheet read failed for {sheet_name}: HTTP {status}"
+                  )
+              if text.lstrip().lower().startswith("<!doctype html"):
+                  raise RuntimeError(
+                      f"Spreadsheet read returned HTML for {sheet_name}; "
+                      "confirm the sheet remains accessible to the workflow."
+                  )
+
+              rows = list(csv.DictReader(io.StringIO(text)))
+              if not rows and sheet_name in {"Portfolio", "Watchlist"}:
+                  raise RuntimeError(f"Spreadsheet sheet is empty: {sheet_name}")
+              return rows
+
+
+          def parse_bool(value):
+              return str(value or "").strip().upper() in {
+                  "TRUE", "YES", "Y", "1", "ENABLED", "ACTIVE"
+              }
+
 
           def safe_float(value):
               try:
-                  text = str(value).strip().replace(",", "").replace("%", "")
+                  text = str(value or "").strip().replace(",", "").replace("%", "")
                   return float(text) if text else None
               except (TypeError, ValueError):
                   return None
 
-          def fetch_tencent_quote(code):
-              url = f"https://qt.gtimg.cn/q=r_hk{code}"
 
-              request = urllib.request.Request(
+          def normalize_market(value):
+              market = str(value or "").strip().upper()
+              aliases = {
+                  "HONG KONG": "HK",
+                  "USA": "US",
+                  "UNITED STATES": "US",
+              }
+              return aliases.get(market, market)
+
+
+          def normalize_ticker(market, value):
+              ticker = str(value or "").strip().upper()
+              if market == "HK":
+                  digits = "".join(character for character in ticker if character.isdigit())
+                  if not digits:
+                      raise ValueError(f"Invalid HK ticker: {value!r}")
+                  return digits.zfill(5)
+              if market == "US":
+                  if not ticker:
+                      raise ValueError("US ticker is empty")
+                  return ticker
+              raise ValueError(f"Unsupported market: {market!r}")
+
+
+          def add_security(universe, row, origin):
+              market = normalize_market(row.get("Market"))
+              if market not in {"HK", "US"}:
+                  return
+
+              ticker = normalize_ticker(market, row.get("Ticker"))
+              key = (market, ticker)
+              existing = universe.get(key, {})
+              origins = set(existing.get("origins", []))
+              origins.add(origin)
+
+              universe[key] = {
+                  "market": market,
+                  "ticker": ticker,
+                  "name": (
+                      str(row.get("Name") or "").strip()
+                      or existing.get("name", "")
+                  ),
+                  "data_symbol": (
+                      str(row.get("Data Symbol") or "").strip()
+                      or existing.get("data_symbol", "")
+                  ),
+                  "tracking_reason": (
+                      str(row.get("Tracking Reason") or "").strip()
+                      or existing.get("tracking_reason", "")
+                  ),
+                  "quote_source_requested": (
+                      str(row.get("Quote Source") or "").strip()
+                      or existing.get("quote_source_requested", "")
+                  ),
+                  "origins": sorted(origins),
+              }
+
+
+          def build_universe():
+              portfolio_rows = load_sheet_rows("Portfolio")
+              watchlist_rows = load_sheet_rows("Watchlist")
+              universe = {}
+
+              for row in portfolio_rows:
+                  quantity = safe_float(row.get("Quantity")) or 0
+                  status = str(row.get("Status") or "").strip().upper()
+                  if quantity > 0 and status == "ACTIVE":
+                      add_security(universe, row, "Portfolio")
+
+              for row in watchlist_rows:
+                  if parse_bool(row.get("Enabled")):
+                      add_security(universe, row, "Watchlist")
+
+              securities = sorted(
+                  universe.values(),
+                  key=lambda item: (item["market"], item["ticker"]),
+              )
+              if not securities:
+                  raise RuntimeError(
+                      "Dynamic universe is empty: no active Portfolio rows and no enabled Watchlist rows."
+                  )
+              return securities
+
+
+          def normalize_quote_time(raw_value):
+              raw = str(raw_value or "").strip()
+              candidates = []
+              if len(raw) == 14 and raw.isdigit():
+                  candidates.append((raw, "%Y%m%d%H%M%S"))
+              candidates.extend([
+                  (raw, "%Y/%m/%d %H:%M:%S"),
+                  (raw, "%Y-%m-%d %H:%M:%S"),
+              ])
+
+              for value, pattern in candidates:
+                  try:
+                      parsed = datetime.strptime(value, pattern)
+                      return (
+                          parsed.strftime("%Y/%m/%d %H:%M:%S"),
+                          parsed.strftime("%Y-%m-%d"),
+                      )
+                  except ValueError:
+                      continue
+              raise ValueError(f"Unrecognized quote timestamp: {raw_value!r}")
+
+
+          def tencent_fields(prefix):
+              url = f"https://qt.gtimg.cn/q={prefix}"
+              _, raw = request_bytes(
                   url,
                   headers={
                       "User-Agent": "Mozilla/5.0",
                       "Referer": "https://stockapp.finance.qq.com/",
                   },
+                  timeout=20,
               )
-
-              with urllib.request.urlopen(request, timeout=20) as response:
-                  raw = response.read()
-
               text = raw.decode("gbk", errors="replace").strip()
-
               if '="' not in text:
-                  raise ValueError(
-                      f"Unexpected Tencent response for {code}: {text[:120]}"
-                  )
-
+                  raise ValueError(f"Unexpected Tencent response: {text[:160]}")
               payload = text.split('="', 1)[1].rsplit('"', 1)[0]
-              fields = payload.split("~")
+              return payload.split("~")
 
-              if len(fields) < 59:
+
+          def fetch_hk_quote(security):
+              ticker = security["ticker"]
+              fields = tencent_fields(f"r_hk{ticker}")
+              if len(fields) < 76:
                   raise ValueError(
-                      f"Insufficient Tencent fields for {code}: {len(fields)}"
+                      f"Insufficient Tencent HK fields for {ticker}: {len(fields)}"
                   )
-
-              quote_time = fields[30].strip()
-
-              if len(quote_time) == 14 and quote_time.isdigit():
-                  quote_time = (
-                      f"{quote_time[0:4]}/{quote_time[4:6]}/{quote_time[6:8]} "
-                      f"{quote_time[8:10]}:{quote_time[10:12]}:{quote_time[12:14]}"
-                  )
+              quote_time, snapshot_date = normalize_quote_time(fields[30])
+              price = safe_float(fields[3])
+              if price is None or price <= 0:
+                  raise ValueError(f"Invalid Tencent HK price for {ticker}: {fields[3]!r}")
 
               return {
+                  "snapshot_date": snapshot_date,
                   "market": "HK",
-                  "code": str(int(code)),
-                  "name": fields[1].strip(),
-                  "price": safe_float(fields[3]),
+                  "code": ticker,
+                  "name": fields[1].strip() or security["name"],
+                  "price": price,
+                  "change_percent": safe_float(fields[32]),
                   "open": safe_float(fields[5]),
                   "high": safe_float(fields[33]),
                   "low": safe_float(fields[34]),
                   "volume": safe_float(fields[6]),
                   "turnover": safe_float(fields[37]),
-                  "change_percent": safe_float(fields[32]),
                   "quote_time": quote_time,
                   "source": "Tencent",
                   "status": "OK",
-                  "notes": "",
+                  "notes": " | ".join(security["origins"]),
               }
+
+
+          def fetch_us_quote(security):
+              ticker = security["ticker"]
+              fields = tencent_fields(f"us{ticker}")
+              if len(fields) < 52:
+                  raise ValueError(
+                      f"Insufficient Tencent US fields for {ticker}: {len(fields)}"
+                  )
+              quote_time, snapshot_date = normalize_quote_time(fields[30])
+              price = safe_float(fields[3])
+              if price is None or price <= 0:
+                  raise ValueError(f"Invalid Tencent US price for {ticker}: {fields[3]!r}")
+
+              return {
+                  "snapshot_date": snapshot_date,
+                  "market": "US",
+                  "code": ticker,
+                  "name": fields[46].strip() or fields[1].strip() or security["name"],
+                  "price": price,
+                  "change_percent": safe_float(fields[32]),
+                  "open": safe_float(fields[5]),
+                  "high": safe_float(fields[33]),
+                  "low": safe_float(fields[34]),
+                  "volume": safe_float(fields[6]),
+                  "turnover": None,
+                  "quote_time": quote_time,
+                  "source": "Tencent",
+                  "status": "OK",
+                  "notes": " | ".join(security["origins"]),
+              }
+
+
+          def fetch_quote(security):
+              if security["market"] == "HK":
+                  return fetch_hk_quote(security)
+              if security["market"] == "US":
+                  return fetch_us_quote(security)
+              raise ValueError(f"Unsupported market: {security['market']}")
+
+
+          def upload_group(market, snapshot_date, quotes, failures, universe_size):
+              payload_quotes = []
+              for quote in quotes:
+                  row = dict(quote)
+                  row.pop("snapshot_date", None)
+                  payload_quotes.append(row)
+
+              payload = {
+                  "token": API_TOKEN,
+                  "snapshot_date": snapshot_date,
+                  "quotes": payload_quotes,
+                  "metadata": {
+                      "market": market,
+                      "requested_universe": universe_size,
+                      "successful_in_group": len(payload_quotes),
+                      "failed_total": len(failures),
+                      "failures": failures,
+                      "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                      "universe_source": "Portfolio + enabled Watchlist",
+                  },
+              }
+              body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              status, raw = request_bytes(
+                  WEB_APP_URL,
+                  data=body,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "User-Agent": "JATF-GitHub-Actions/2.0",
+                  },
+                  method="POST",
+                  timeout=30,
+              )
+              response_text = raw.decode("utf-8", errors="replace")
+              print(
+                  f"Apps Script {market} {snapshot_date}: HTTP {status} | {response_text}"
+              )
+              try:
+                  result = json.loads(response_text)
+              except json.JSONDecodeError as error:
+                  raise RuntimeError(
+                      f"Apps Script returned non-JSON response: {response_text[:500]}"
+                  ) from error
+              if result.get("status") != "success":
+                  raise RuntimeError(f"Apps Script rejected upload: {result}")
+              return result
+
+
+          universe = build_universe()
+          print(f"Dynamic universe: {len(universe)} securities")
+          for security in universe:
+              print(
+                  f"  {security['market']:<2} {security['ticker']:<8} "
+                  f"{','.join(security['origins']):<19} {security['name']}"
+              )
 
           quotes = []
           failures = []
+          critical_failures = []
 
-          for code in WATCHLIST:
+          for security in universe:
               try:
-                  quote = fetch_tencent_quote(code)
+                  quote = fetch_quote(security)
                   quotes.append(quote)
-
                   print(
-                      f"{quote['code']:>5} | "
-                      f"{quote['name']:<20} | "
-                      f"{quote['price']} | "
-                      f"{quote['change_percent']}% | "
+                      f"QUOTE {quote['market']} {quote['code']:<8} | "
+                      f"{quote['price']} | {quote['change_percent']}% | "
                       f"{quote['quote_time']}"
                   )
-
               except Exception as error:
-                  failures.append({
-                      "code": code,
+                  failure = {
+                      "market": security["market"],
+                      "ticker": security["ticker"],
+                      "origins": security["origins"],
                       "error": str(error),
-                  })
+                  }
+                  failures.append(failure)
+                  if "Portfolio" in security["origins"]:
+                      critical_failures.append(failure)
                   print(
-                      f"FAILED {code}: {error}",
+                      f"FAILED {security['market']} {security['ticker']}: {error}",
                       file=sys.stderr,
                   )
 
           if not quotes:
-              raise RuntimeError("No valid quotes were retrieved.")
+              raise RuntimeError("No valid quotes were retrieved from the dynamic universe.")
 
-          hk_now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+          grouped_quotes = defaultdict(list)
+          for quote in quotes:
+              grouped_quotes[(quote["market"], quote["snapshot_date"])].append(quote)
 
-          payload = {
-              "token": API_TOKEN,
-              "snapshot_date": hk_now.strftime("%Y-%m-%d"),
-              "quotes": quotes,
-              "metadata": {
-                  "requested": len(WATCHLIST),
-                  "successful": len(quotes),
-                  "failed": len(failures),
-                  "failures": failures,
-                  "generated_at": hk_now.isoformat(),
-              },
-          }
-
-          body = json.dumps(
-              payload,
-              ensure_ascii=False,
-          ).encode("utf-8")
-
-          request = urllib.request.Request(
-              WEB_APP_URL,
-              data=body,
-              headers={
-                  "Content-Type": "application/json; charset=utf-8",
-                  "User-Agent": "JATF-GitHub-Actions/1.0",
-              },
-              method="POST",
-          )
-
-          with urllib.request.urlopen(request, timeout=30) as response:
-              response_text = response.read().decode(
-                  "utf-8",
-                  errors="replace",
+          total_written = 0
+          total_duplicates = 0
+          for (market, snapshot_date), group in sorted(grouped_quotes.items()):
+              result = upload_group(
+                  market,
+                  snapshot_date,
+                  group,
+                  failures,
+                  len(universe),
               )
-              status_code = response.status
-
-          print(f"Apps Script HTTP status: {status_code}")
-          print(f"Apps Script response: {response_text}")
-
-          try:
-              result = json.loads(response_text)
-          except json.JSONDecodeError as error:
-              raise RuntimeError(
-                  f"Apps Script returned non-JSON response: "
-                  f"{response_text[:500]}"
-              ) from error
-
-          if result.get("status") != "success":
-              raise RuntimeError(
-                  f"Apps Script rejected upload: {result}"
-              )
+              total_written += int(result.get("rows_written", 0) or 0)
+              total_duplicates += int(result.get("duplicates_skipped", 0) or 0)
 
           print(
-              f"Upload successful: "
-              f"{result.get('rows_written', 0)} written, "
-              f"{result.get('duplicates_skipped', 0)} duplicates skipped, "
-              f"{result.get('expired_rows_deleted', 0)} expired rows deleted."
+              f"Completed: {len(quotes)} quotes; {total_written} rows written; "
+              f"{total_duplicates} duplicates skipped; {len(failures)} failures."
           )
+
+          if critical_failures:
+              raise RuntimeError(
+                  "One or more active Portfolio securities failed quote retrieval: "
+                  + json.dumps(critical_failures, ensure_ascii=False)
+              )
           PY
