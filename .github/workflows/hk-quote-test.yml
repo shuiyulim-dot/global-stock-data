@@ -1,0 +1,100 @@
+name: HK Quote Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-hk-quotes:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch Hong Kong quotes
+        run: |
+          python <<'PY'
+          import re
+          import urllib.request
+          from datetime import datetime, timezone
+
+          STOCKS = [
+              "00700",
+              "00981",
+              "02476",
+              "02513",
+              "06869",
+              "07709",
+              "06082",
+              "01888",
+              "06809",
+          ]
+
+          def get_quote(code):
+              url = f"https://qt.gtimg.cn/q=r_hk{code}"
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Mozilla/5.0"}
+              )
+
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  text = response.read().decode("gbk", errors="replace")
+
+              match = re.search(r'"(.+)"', text)
+              if not match:
+                  raise RuntimeError("No quote returned")
+
+              fields = match.group(1).split("~")
+              if len(fields) < 76:
+                  raise RuntimeError(
+                      f"Unexpected field count: {len(fields)}"
+                  )
+
+              return {
+                  "code": fields[2],
+                  "name": fields[1],
+                  "price": fields[3],
+                  "previous_close": fields[4],
+                  "open": fields[5],
+                  "volume": fields[6],
+                  "timestamp": fields[30],
+                  "change_percent": fields[32],
+                  "high": fields[33],
+                  "low": fields[34],
+                  "amount": fields[37],
+                  "currency": fields[75],
+              }
+
+          print("=" * 90)
+          print("JASON AI TREND FUND — HK QUOTE TEST")
+          print("Workflow UTC time:", datetime.now(timezone.utc).isoformat())
+          print("=" * 90)
+
+          successful = 0
+
+          for code in STOCKS:
+              try:
+                  quote = get_quote(code)
+                  successful += 1
+
+                  print(
+                      f"{quote['code']} | "
+                      f"{quote['name']} | "
+                      f"Price: {quote['price']} {quote['currency']} | "
+                      f"Change: {quote['change_percent']}% | "
+                      f"Open: {quote['open']} | "
+                      f"High: {quote['high']} | "
+                      f"Low: {quote['low']} | "
+                      f"Quote time: {quote['timestamp']}"
+                  )
+              except Exception as error:
+                  print(f"{code} | ERROR: {error}")
+
+          print("=" * 90)
+          print(f"Successful quotes: {successful}/{len(STOCKS)}")
+
+          if successful == 0:
+              raise SystemExit("All quote requests failed")
+          PY
