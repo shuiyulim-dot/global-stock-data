@@ -37,11 +37,44 @@ jobs:
           print(body)
           PY
 
-      - name: Dispatch live market data workflow
+      - name: Dispatch HK market workflow
+        if: steps.request.outputs.market == 'HK'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${REPOSITORY}/actions/workflows/jatf-hk-market-data.yml/dispatches" \
+            -f ref="${GITHUB_REF_NAME}"
+
+      - name: Dispatch US market workflow
+        if: steps.request.outputs.market == 'US'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${REPOSITORY}/actions/workflows/jatf-market-data.yml/dispatches" \
+            -f ref="${GITHUB_REF_NAME}"
+
+      - name: Dispatch all market workflows
+        if: steps.request.outputs.market == 'ALL'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/${REPOSITORY}/actions/workflows/jatf-hk-market-data.yml/dispatches" \
+            -f ref="${GITHUB_REF_NAME}"
           gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
