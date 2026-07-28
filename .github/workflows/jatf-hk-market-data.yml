@@ -1,0 +1,296 @@
+name: JATF HK Market Data
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update-hk-market-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build HK universe, fetch quotes, validate, and upload
+        env:
+          JATF_WEB_APP_URL: ${{ secrets.JATF_WEB_APP_URL }}
+          JATF_API_TOKEN: ${{ secrets.JATF_API_TOKEN }}
+          JATF_SPREADSHEET_ID: 1e74OtPgtbkn6JzGS-YFMjdelIH8gXx7osHJPFC53gg4
+        run: |
+          python - <<'PY'
+          import csv
+          import io
+          import json
+          import os
+          import sys
+          import urllib.parse
+          import urllib.request
+          from collections import defaultdict
+          from datetime import datetime
+
+          WEB_APP_URL = os.environ.get("JATF_WEB_APP_URL", "").strip()
+          API_TOKEN = os.environ.get("JATF_API_TOKEN", "").strip()
+          SPREADSHEET_ID = os.environ.get("JATF_SPREADSHEET_ID", "").strip()
+
+          if not WEB_APP_URL:
+              raise RuntimeError("Missing GitHub secret: JATF_WEB_APP_URL")
+          if not API_TOKEN:
+              raise RuntimeError("Missing GitHub secret: JATF_API_TOKEN")
+          if not SPREADSHEET_ID:
+              raise RuntimeError("Missing JATF_SPREADSHEET_ID")
+
+          def request_bytes(url, *, data=None, headers=None, method=None, timeout=30):
+              request = urllib.request.Request(
+                  url,
+                  data=data,
+                  headers=headers or {},
+                  method=method,
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return response.status, response.read()
+
+          def load_sheet_rows(sheet_name):
+              encoded_sheet = urllib.parse.quote(sheet_name, safe="")
+              url = (
+                  f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq"
+                  f"?tqx=out:csv&sheet={encoded_sheet}"
+              )
+              status, raw = request_bytes(
+                  url,
+                  headers={"User-Agent": "JATF-GitHub-Actions/2.2-HK"},
+                  timeout=30,
+              )
+              text = raw.decode("utf-8-sig", errors="replace")
+              if status != 200 or text.lstrip().lower().startswith("<!doctype html"):
+                  raise RuntimeError(f"Spreadsheet read failed for {sheet_name}: HTTP {status}")
+              reader = csv.DictReader(io.StringIO(text))
+              return list(reader.fieldnames or []), list(reader)
+
+          def safe_float(value):
+              try:
+                  text = str(value or "").strip().replace(",", "").replace("%", "")
+                  return float(text) if text else None
+              except (TypeError, ValueError):
+                  return None
+
+          def parse_bool(value):
+              return str(value or "").strip().upper() in {
+                  "TRUE", "YES", "Y", "1", "ENABLED", "ACTIVE"
+              }
+
+          def normalize_market(value):
+              market = str(value or "").strip().upper()
+              return {"HONG KONG": "HK"}.get(market, market)
+
+          def normalize_hk_ticker(value):
+              digits = "".join(c for c in str(value or "") if c.isdigit())
+              if not digits:
+                  raise ValueError(f"Invalid HK ticker: {value!r}")
+              return digits.zfill(5)
+
+          def add_security(universe, row, origin):
+              if normalize_market(row.get("Market")) != "HK":
+                  return
+              ticker = normalize_hk_ticker(row.get("Ticker"))
+              existing = universe.get(ticker, {})
+              origins = set(existing.get("origins", []))
+              origins.add(origin)
+              universe[ticker] = {
+                  "ticker": ticker,
+                  "name": str(row.get("Name") or "").strip() or existing.get("name", ""),
+                  "origins": sorted(origins),
+              }
+
+          portfolio_headers, portfolio_rows = load_sheet_rows("Portfolio")
+          watchlist_headers, watchlist_rows = load_sheet_rows("Watchlist")
+
+          required_portfolio = {"Market", "Ticker", "Name", "Quantity", "Status"}
+          required_watchlist = {"Enabled", "Market", "Ticker", "Name"}
+          if not required_portfolio.issubset(set(portfolio_headers)):
+              raise RuntimeError(f"Portfolio headers invalid: {portfolio_headers}")
+          if not required_watchlist.issubset(set(watchlist_headers)):
+              raise RuntimeError(f"Watchlist headers invalid: {watchlist_headers}")
+
+          universe = {}
+          active_portfolio = set()
+          integrity_errors = []
+
+          for row_number, row in enumerate(portfolio_rows, start=2):
+              quantity = safe_float(row.get("Quantity")) or 0
+              if quantity <= 0 or normalize_market(row.get("Market")) != "HK":
+                  continue
+              status = str(row.get("Status") or "").strip().upper()
+              ticker_raw = str(row.get("Ticker") or "").strip()
+              if status != "ACTIVE":
+                  integrity_errors.append({
+                      "row": row_number,
+                      "ticker": ticker_raw,
+                      "status": status,
+                      "error": "Non-zero HK Portfolio row must have Status=Active",
+                  })
+                  continue
+              try:
+                  ticker = normalize_hk_ticker(ticker_raw)
+              except Exception as error:
+                  integrity_errors.append({
+                      "row": row_number,
+                      "ticker": ticker_raw,
+                      "status": status,
+                      "error": str(error),
+                  })
+                  continue
+              active_portfolio.add(ticker)
+              add_security(universe, row, "Portfolio")
+
+          if integrity_errors:
+              raise RuntimeError(
+                  "HK Portfolio integrity validation failed: "
+                  + json.dumps(integrity_errors, ensure_ascii=False)
+              )
+
+          for row in watchlist_rows:
+              if parse_bool(row.get("Enabled")) and normalize_market(row.get("Market")) == "HK":
+                  add_security(universe, row, "Watchlist")
+
+          if not universe:
+              raise RuntimeError("HK universe is empty")
+
+          def normalize_quote_time(raw_value):
+              raw = str(raw_value or "").strip()
+              candidates = []
+              if len(raw) == 14 and raw.isdigit():
+                  candidates.append((raw, "%Y%m%d%H%M%S"))
+              candidates.extend([
+                  (raw, "%Y/%m/%d %H:%M:%S"),
+                  (raw, "%Y-%m-%d %H:%M:%S"),
+              ])
+              for value, pattern in candidates:
+                  try:
+                      parsed = datetime.strptime(value, pattern)
+                      return parsed.strftime("%Y/%m/%d %H:%M:%S"), parsed.strftime("%Y-%m-%d")
+                  except ValueError:
+                      pass
+              raise ValueError(f"Unrecognized quote timestamp: {raw_value!r}")
+
+          def fetch_hk_quote(security):
+              ticker = security["ticker"]
+              url = f"https://qt.gtimg.cn/q=r_hk{ticker}"
+              _, raw = request_bytes(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0",
+                      "Referer": "https://stockapp.finance.qq.com/",
+                  },
+                  timeout=20,
+              )
+              text = raw.decode("gbk", errors="replace").strip()
+              if '="' not in text:
+                  raise ValueError(f"Unexpected Tencent response: {text[:160]}")
+              fields = text.split('="', 1)[1].rsplit('"', 1)[0].split("~")
+              if len(fields) < 76:
+                  raise ValueError(f"Insufficient Tencent HK fields for {ticker}: {len(fields)}")
+              quote_time, snapshot_date = normalize_quote_time(fields[30])
+              price = safe_float(fields[3])
+              if price is None or price <= 0:
+                  raise ValueError(f"Invalid Tencent HK price for {ticker}: {fields[3]!r}")
+              return {
+                  "snapshot_date": snapshot_date,
+                  "market": "HK",
+                  "code": ticker,
+                  "name": fields[1].strip() or security["name"],
+                  "price": price,
+                  "change_percent": safe_float(fields[32]),
+                  "open": safe_float(fields[5]),
+                  "high": safe_float(fields[33]),
+                  "low": safe_float(fields[34]),
+                  "volume": safe_float(fields[6]),
+                  "turnover": safe_float(fields[37]),
+                  "quote_time": quote_time,
+                  "source": "Tencent",
+                  "status": "OK",
+                  "notes": " | ".join(security["origins"]),
+              }
+
+          quotes = []
+          failures = []
+          for ticker in sorted(universe):
+              security = universe[ticker]
+              try:
+                  quote = fetch_hk_quote(security)
+                  quotes.append(quote)
+                  print(
+                      f"QUOTE HK {ticker} | {quote['price']} | "
+                      f"{quote['change_percent']}% | {quote['quote_time']}"
+                  )
+              except Exception as error:
+                  failure = {
+                      "market": "HK",
+                      "ticker": ticker,
+                      "origins": security["origins"],
+                      "error": str(error),
+                  }
+                  failures.append(failure)
+                  print(f"FAILED HK {ticker}: {error}", file=sys.stderr)
+
+          successful = {quote["code"] for quote in quotes}
+          uncovered = sorted(active_portfolio.difference(successful))
+          if uncovered:
+              raise RuntimeError(
+                  "HK Portfolio coverage gate failed; no partial upload: "
+                  + json.dumps(uncovered, ensure_ascii=False)
+              )
+          if not quotes:
+              raise RuntimeError("No valid HK quotes were retrieved")
+
+          grouped = defaultdict(list)
+          for quote in quotes:
+              grouped[quote["snapshot_date"]].append(quote)
+
+          for snapshot_date, group in sorted(grouped.items()):
+              payload_quotes = []
+              for quote in group:
+                  row = dict(quote)
+                  row.pop("snapshot_date", None)
+                  payload_quotes.append(row)
+              payload = {
+                  "token": API_TOKEN,
+                  "snapshot_date": snapshot_date,
+                  "quotes": payload_quotes,
+                  "metadata": {
+                      "market": "HK",
+                      "requested_universe": len(universe),
+                      "active_portfolio_count": len(active_portfolio),
+                      "successful_in_group": len(payload_quotes),
+                      "failed_total": len(failures),
+                      "failures": failures,
+                      "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                      "universe_source": "HK Portfolio + enabled HK Watchlist",
+                      "portfolio_coverage_gate": "PASS",
+                      "workflow": "jatf-hk-market-data.yml",
+                  },
+              }
+              body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              status, raw = request_bytes(
+                  WEB_APP_URL,
+                  data=body,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "User-Agent": "JATF-GitHub-Actions/2.2-HK",
+                  },
+                  method="POST",
+                  timeout=30,
+              )
+              response_text = raw.decode("utf-8", errors="replace")
+              print(f"Apps Script HK {snapshot_date}: HTTP {status} | {response_text}")
+              result = json.loads(response_text)
+              if result.get("status") != "success":
+                  raise RuntimeError(f"Apps Script rejected HK upload: {result}")
+
+          print(
+              f"Completed HK refresh: {len(quotes)} quotes, "
+              f"{len(active_portfolio)} active portfolio tickers, "
+              f"{len(failures)} watchlist-only failures."
+          )
+          PY
